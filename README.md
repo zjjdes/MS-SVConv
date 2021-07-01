@@ -9,6 +9,23 @@ The combination of both allows better generalization capabilities and transfer a
 The code is available on the [torch-points3d repository](https://github.com/nicolas-chaulet/torch-points3d).
 This repository is to show how to launch the code for training and testing.
 
+## This repo
+Added a few notebooks and scripts in `./notebook/` to give a more comprehensive guide on using MS-SVConv on Ubuntu 20.04, RTX3070, as well as performing keypoint matching/registraion using UrbanNav LiDAR data.
+
+To use:
+ - `git clone https://github.com/nicolas-chaulet/torch-points3d`
+ - `cd torch-points3d`
+ - `git clone https://github.com/zjjdes/MS-SVConv`
+ - Install poetry
+ - `poetry install --no-root`
+ - `poetry shell`
+ - Follow `./notebook/setup_environment.ipynb` to install packages
+
+More notebooks/scripts:
+ - `./notebook/demo_MSSVConv.ipynb`: original demo notebook from `humanpose1/MS-SVConv`
+ - `./notebook/demo_MSSVConv_cust.ipynb`: modified demo notebook
+ - `./notebook/keypoint_matching.py`: perform keypoint matching and point cloud registration using a series of scans, optimised for UrbanNav data
+
 ## Demo
 If you want to try MS-SVConv without installing anything on your computer, A Google colab notebook is available [here](https://colab.research.google.com/github/humanpose1/MS-SVConv/blob/main/notebook/demo_MSSVConv.ipynb) (it takes few minutes to install everything). In the colab, we compute features using MS-SVConv and use Ransac (implementation of Open3D) to compute the transformation.
 You can try on 3DMatch on ETH. With this notebook, you can directly use the pretrained model on your project !
