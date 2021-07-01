@@ -140,3 +140,7 @@ cython_debug/
 # Data
 /notebook/data/
 /notebook/models/
+
+# vscode
+.vscode/
+/notebook/.vscode
