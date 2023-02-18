@@ -1,6 +1,6 @@
 import os
 from os import listdir, remove
-from os.path import isfile, join
+from os.path import isfile, join, splitext
 import pathlib
 import time
 import csv
@@ -20,7 +20,7 @@ torch.cuda.set_per_process_memory_fraction(0.8, 0)
 print(torch.cuda.current_device())
 print(torch.cuda.get_device_name(0))
 
-def remove_rover(pcd):
+def remove_rover(coords):
     """Remove rover vehicle from the point cloud
 
     Args:
@@ -29,7 +29,6 @@ def remove_rover(pcd):
     Returns:
         [type]: [description]
     """
-    coords = np.asarray(pcd.points)
 
     rover_width = 2 # x, 2
     rover_length = 5 # y, 5
@@ -38,26 +37,36 @@ def remove_rover(pcd):
     # Assuming sensor is the origin and is on top of the vehicle
     coords = np.delete(coords, np.where((coords[:,0] > -rover_width / 2) & (coords[:,0] < rover_width / 2) & (coords[:,1] > -rover_length / 2) & (coords[:,1] < rover_length / 2) & (coords[:,2] < rover_height)), axis=0)
 
-    new_pc = o3d.geometry.PointCloud()
-    new_pc.points = o3d.utility.Vector3dVector(coords)
-
-    return new_pc
+    return coords
 
 
-def remove_ground(pcd):
-    n_scan = 32
-    horizon_scan = 1800
-    # ang_top = 10.67 # HDL-32E
-    # ang_bottom = -30.67 # HDL-32E
-    ang_top = 15 # VLP-32C
-    ang_bottom = -25 # VLP-32C
+def remove_ground(coords):
+    # # HDL-32E
+    # n_scan = 32 # vertical channels
+    # horizon_scan = 1800 # horizontal channels
+    # ang_top = 10.67 # max vertical angle
+    # ang_bottom = -30.67 # min vertical angle
+    # ground_scan_ind = 20
+
+    # # VLP-32C
+    # n_scan = 32 # vertical channels
+    # horizon_scan = 1800 # horizontal channels
+    # ang_top = 15 # max vertical angle
+    # ang_bottom = -25 # min vertical angle
+    # ground_scan_ind = 20
+
+    # HDL-64E
+    n_scan = 64 # vertical channels
+    horizon_scan = 1800 # horizontal channels
+    ang_top = 2 # max vertical angle
+    ang_bottom = -24.9 # min vertical angle
+    ground_scan_ind = 40
+    
     ang_res_x = 360/horizon_scan
     ang_res_y = (ang_top-ang_bottom) / (n_scan - 1)
-    ground_scan_ind = 20
+
     sensor_mount_angle = 0
     sensor_minimum_range = 1
-
-    coords = np.asarray(pcd.points)
 
     # Reorder points
     total_pts = coords.shape[0]
@@ -114,10 +123,7 @@ def remove_ground(pcd):
     
     new_points = reordered_coords[:, :3][reordered_coords[:, -1] != 1]
 
-    new_pc = o3d.geometry.PointCloud()
-    new_pc.points = o3d.utility.Vector3dVector(new_points)
-
-    return new_pc
+    return new_points
 
 
 def read_pcd(path, downsample=0, non_rover=True, non_ground=False):
@@ -129,18 +135,24 @@ def read_pcd(path, downsample=0, non_rover=True, non_ground=False):
     Returns:
         [type]: [description]
     """
-    pcd = o3d.io.read_point_cloud(path)
-
-    if downsample > 0:
-        pcd = pcd.voxel_down_sample(voxel_size)
+    if splitext(path)[1] != '.bin':
+        pcd = o3d.io.read_point_cloud(path)
+        points = pcd.points
+    else:
+        points = np.fromfile(path, dtype=np.float32).reshape((-1, 4))
+        points = points[:, 0:3]
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(points)
     
+    if downsample > 0:
+        pcd = pcd.voxel_down_sample(downsample)
+        points = pcd.points
+
     if non_rover:
-        pcd = remove_rover(pcd)
+        points = remove_rover(points)
 
     if non_ground:
-        pcd = remove_ground(pcd)
-
-    points = pcd.points
+        points = remove_ground(points)
 
     data = Pair(pos=torch.from_numpy(np.asarray(points)).float(),
                 batch=torch.zeros(len(points)).long())
@@ -250,12 +262,12 @@ def load_lists(pos_file, map_file, ref_file, rov_file):
     return pos_xyz, map_xyz, ref_id, rov_id
 
 
-def main(velo_dir, out_dir, model_file, pos_file, map_file, ref_file, rov_file, max_ref, max_trials, min_fitness, voxel_size, num_kpts, non_rover, non_ground, downsample, ransac_dist):
-    # Load reference list, rover list, reference vehicle positions, rover vehicle positions
-    pos_xyz, map_xyz, ref_id, rov_id = load_lists(pos_file, map_file, ref_file, rov_file)
+def main(velo_rov_dir, velo_ref_dir, out_dir, model_file, rov_file, max_trials, min_fitness, voxel_size, num_kpts, downsample_ref, downsample_rov, non_rover, non_ground, ransac_dist):
+    # File type of the point clouds
+    ftype = '.bin' # bin or ply
 
-    # Euclidean distances between rover scans and reference scans
-    dists = cdist(pos_xyz, map_xyz)
+    # IDs/timestamps of the rover scans 
+    rov_id = np.genfromtxt(rov_file, dtype=str, delimiter=',').reshape((-1, 1))
 
     # Lists of processed and unprocessed scans
     processed = np.empty((0, 2))
@@ -268,141 +280,141 @@ def main(velo_dir, out_dir, model_file, pos_file, map_file, ref_file, rov_file, 
     # transform = Compose([Random3AxisRotation(rot_x=180, rot_y=180, rot_z=180), GridSampling3D(size=voxel_size, quantize_coords=True, mode='last'), AddOnes(), AddFeatByKey(add_to_x=True, feat_name="ones")])
     transform = Compose([GridSampling3D(size=voxel_size, quantize_coords=True, mode='last'), AddOnes(), AddFeatByKey(add_to_x=True, feat_name="ones")])
 
-    # Collect features of reference scans
-    data_map = {}
-
-    for i in range(dists.shape[0]):
-        t_init = time.time()
-
-        j = 0
-        found = False
+    for rov in rov_id:
+        rov = int(rov)
 
         # Locate the rover scan file
-        rov_filename = str(rov_id[i])[2:-2]
-        rov_path = join(velo_dir, rov_filename + '.ply')
-        data_s = transform(read_pcd(rov_path, downsample, non_rover, non_ground)) # read rover scan
-
-        # Indices of sorted distances to all reference cans for current rover scan
-        sorted_idx = np.argsort(dists[i, :])
+        rov_filename = str(rov)
+        rov_path = join(velo_rov_dir, rov_filename + ftype)
+        data_s = transform(read_pcd(rov_path, downsample_rov, non_rover, non_ground)) # read rover scan
 
         # Create results folder if it does not exist
         result_dir = join(out_dir, rov_filename)
         if not os.path.exists(result_dir):
             os.makedirs(result_dir)
         
-        while not found and j <= max_ref:
-            # Locate the reference scan file
-            ref_filename = str(ref_id[sorted_idx[j]])[2:-2]
-            ref_path = join(velo_dir, ref_filename + '.ply')
+        # Locate the reference scan file
+        ref = rov + 9000000
+        ref_filename = str(ref)
+        ref_path = join(velo_ref_dir, ref_filename + ftype)
+        data_t = transform(read_pcd(ref_path, downsample_ref, non_rover, non_ground)) # read reference scan
 
-            # Reuse features of reference scans if they have been computed before
-            if ref_filename in data_map:
-                data_t = data_map[ref_filename]
-            else:
-                data_t = transform(read_pcd(ref_path, downsample, non_rover, non_ground)) # read reference scan
-                data_map[ref_filename] = data_t
+        print('Processing ROVER: ' + rov_filename + ' with REFERENCE: ' + ref_filename)
 
-            print('Processing ROVER: ' + rov_filename + ' with REFERENCE: ' + ref_filename + ', d=' + str(dists[i, sorted_idx[j]]))
+        t_init = time.time()
 
-            # Compute the matches
-            with torch.no_grad():
-                model.set_input(data_s, "cuda")
-                feat_s = model.forward()
-                model.set_input(data_t, "cuda")
-                feat_t = model.forward()
+        # Compute the matches
+        with torch.no_grad():
+            model.set_input(data_s, "cuda")
+            feat_s = model.forward()
+            model.set_input(data_t, "cuda")
+            feat_t = model.forward()
 
-            rand_s = torch.randint(0, len(feat_s), (num_kpts, ))
-            rand_t = torch.randint(0, len(feat_t), (num_kpts, ))
+        rand_s = torch.randint(0, len(feat_s), (num_kpts, ))
+        rand_t = torch.randint(0, len(feat_t), (num_kpts, ))
 
-            # matches = get_matches(feat_s[rand_s], feat_t[rand_t], sym=True)  # nearest neighbour
-            # sel_s = matches[:,0]
-            # sel_t = matches[:,1]
+        print(' - Feature computation time=' + str(time.time() - t_init) + ' seconds.')
 
-            # Register scans using RANSAC
-            for k in range(max_trials):
-                # reg_result = fast_registration(data_s.pos[rand_s], data_t.pos[rand_t], feat_s[rand_s], feat_t[rand_t], ransac_dist)
-                reg_result = ransac(data_s.pos[rand_s], data_t.pos[rand_t], feat_s[rand_s], feat_t[rand_t], ransac_dist)
-                # reg_result = ransac(data_s.pos[rand_s][sel_s], data_t.pos[rand_t][sel_t], feat_s[rand_s][sel_s], feat_t[rand_t][sel_t], ransac_dist)
+        # Find nearest neighbours and save features
+        t_check = time.time()
+        matches = get_matches(feat_s[rand_s], feat_t[rand_t], sym=True) # nearest neighbour
+        # sel_s = matches[:,0]
+        # sel_t = matches[:,1]
 
-                Tr = reg_result.transformation
-                inlier_rmse = reg_result.inlier_rmse
-                corres = np.asarray(reg_result.correspondence_set)
-                kpts_s = np.asarray(data_s.pos[rand_s][corres[:, 0], :]) # TODO: apply georeferencing here?
-                kpts_t = np.asarray(data_t.pos[rand_t][corres[:, 1], :])
-                # kpts_s = np.asarray(data_s.pos[rand_s][sel_s][corres[:, 0], :]) # TODO: apply georeferencing here?
-                # kpts_t = np.asarray(data_t.pos[rand_t][sel_t][corres[:, 1], :])
+        np.savetxt(join(result_dir, rov_filename + '_nn.csv'), np.asarray(data_s.pos[rand_s][matches[:, 0], :]), fmt='%.5f', delimiter=',')
+        np.savetxt(join(result_dir, ref_filename + '_nn.csv'), np.asarray(data_t.pos[rand_t][matches[:, 1], :]), fmt='%.5f', delimiter=',')
 
-                if reg_result.fitness >= min_fitness and is_well_distributed(kpts_s):
-                    break
-                elif k == max_trials - 1:
-                    inlier_rmse = 0.0
+        print(' - kNN time=' + str(time.time() - t_check) + ' seconds.')
 
-            if inlier_rmse == 0.0 and j >= max_ref:
-                unprocessed = np.vstack((unprocessed, np.array([rov_filename])))
-                j += 1
-                print(' - Failed to match ' + rov_filename + ' with any reference scan, skip.')
-            elif inlier_rmse == 0.0:
-                j += 1
-                print(' - Fitness=' + str(reg_result.fitness) + ', ' + rov_filename + ' to be reprocessed with the next nearest reference scan.')
-            else:
-                print(' - Registration successful after ' + str(k + 1) + ' trials with reference scan #' + str(j + 1) + '. RMSE=' + str(inlier_rmse) + ', Fitness=' + str(reg_result.fitness) + ', matched ' + str(corres.shape[0]) + ' keypoints.')
+        # Register scans using RANSAC
+        t_check = time.time()
+        for k in range(max_trials):
+            # reg_result = fast_registration(data_s.pos[rand_s], data_t.pos[rand_t], feat_s[rand_s], feat_t[rand_t], ransac_dist)
+            reg_result = ransac(data_s.pos[rand_s], data_t.pos[rand_t], feat_s[rand_s], feat_t[rand_t], ransac_dist)
+            # reg_result = ransac(data_s.pos[rand_s][sel_s], data_t.pos[rand_t][sel_t], feat_s[rand_s][sel_s], feat_t[rand_t][sel_t], ransac_dist)
 
-                # Collect results: [reference scan ID, rover scan ID, RMSE]
-                results = [[ref_filename], [rov_filename], [inlier_rmse]]
+            Tr = reg_result.transformation
+            inlier_rmse = reg_result.inlier_rmse
+            corres = np.asarray(reg_result.correspondence_set)
+            kpts_s = np.asarray(data_s.pos[rand_s][corres[:, 0], :])
+            kpts_t = np.asarray(data_t.pos[rand_t][corres[:, 1], :])
+            # kpts_s = np.asarray(data_s.pos[rand_s][sel_s][corres[:, 0], :])
+            # kpts_t = np.asarray(data_t.pos[rand_t][sel_t][corres[:, 1], :])
 
-                # Save results
-                with open(join(result_dir, 'Ref_Rov_RMSE.csv'), 'w') as f:
-                    writer = csv.writer(f)
-                    writer.writerows(results)
-                    writer.writerows(Tr)
-                np.savetxt(join(result_dir, rov_filename + '_keypts.csv'), kpts_s, fmt='%.5f', delimiter=',')
-                np.savetxt(join(result_dir, ref_filename + '_keypts.csv'), kpts_t, fmt='%.5f', delimiter=',')
+            if reg_result.fitness >= min_fitness:
+                break
+            elif k == max_trials - 1:
+                inlier_rmse = 0.0
+        
+        if inlier_rmse == 0.0:
+            unprocessed = np.vstack((unprocessed, np.array([rov_filename])))
+            print(' - Fitness=' + str(reg_result.fitness) + ', ' + rov_filename + ' failed to match with ' + ref_filename)
+        else:
+            print(' - Registration successful after ' + str(k + 1) + ' trials. RMSE=' + str(inlier_rmse) + ', Fitness=' + str(reg_result.fitness) + ', matched ' + str(corres.shape[0]) + ' keypoints.')
 
-                processed = np.vstack((processed, np.array([rov_filename, ref_filename])))
+            # Collect results: [reference scan ID, rover scan ID, RMSE]
+            results = [[ref_filename], [rov_filename], [inlier_rmse]]
 
-                # Toggle the found flag to terminate the loop
-                found = True
+            # Save results
+            with open(join(result_dir, 'Ref_Rov_RMSE.csv'), 'w') as f:
+                writer = csv.writer(f)
+                writer.writerows(results)
+                writer.writerows(Tr)
+            np.savetxt(join(result_dir, rov_filename + '_keypts.csv'), kpts_s, fmt='%.5f', delimiter=',')
+            np.savetxt(join(result_dir, ref_filename + '_keypts.csv'), kpts_t, fmt='%.5f', delimiter=',')
 
-            print(' - Runtime=' + str(time.time() - t_init) + ' seconds.\n')
+            processed = np.vstack((processed, np.array([rov_filename, ref_filename])))
+
+            print(' - RANSAC time=' + str(time.time() - t_check) + ' seconds.')
+            print(' - Total runtime=' + str(time.time() - t_init) + ' seconds.\n')
 
     np.savetxt(join(out_dir, 'corres_scans.csv'), processed, fmt='%s', delimiter=',')
     np.savetxt(join(out_dir, 'not_processed.csv'), unprocessed, fmt='%s', delimiter=',')
 
 
 if __name__ == '__main__':
-    # HK-Data20200314
-    base_dir = '../../../UrbanNav/HK-Data20200314'
-    velo_dir = join(base_dir, 'velodyne')
-    out_dir = join(base_dir, 'keypoints_ETH_3000_0.01_0.1_NRNG_test3')
-    pos_file = join(base_dir, 'ublox_sd_test3.csv')
-    map_file = join(base_dir, 'velodyne_map2/hdMap_xyz.csv')
-    ref_file = join(base_dir, 'map_list2.txt')
-    rov_file = join(base_dir, 'test_list3.txt')
+    # Preprocessed KITTI
+    # base_dir = '../../../KITTI_partial'
+    # velo_rov_dir = join(base_dir, 'velodyne_rov')
+    # velo_ref_dir = join(base_dir, 'velodyne_ref')
+    # out_dir = join(base_dir, 'keypoints_ETH_3000_0.01_0.1_4')
+    # rov_file = join(base_dir, 'test_list_4.txt')
 
-    # # Tokyo-Odaiba
-    # base_dir = '../../../UrbanNav/Tokyo_Data/Odaiba'
-    # velo_dir = join(base_dir, 'velodyne')
-    # out_dir = join(base_dir, 'keypoints_ETH_3000_0.01_0.1_NR')
-    # pos_file = join(base_dir, 'ublox_test.csv')
-    # map_file = join(base_dir, 'velodyne_map/hdMap_xyz.csv')
-    # ref_file = join(base_dir, 'map_list.txt')
-    # rov_file = join(base_dir, 'test_list.txt')
+    # Preprocessed KITTI
+    base_dir = '../../../KITTI_partial_5s_220504'
+    velo_rov_dir = join(base_dir, 'velodyne_rov')
+    velo_ref_dir = join(base_dir, 'velodyne_ref')
+    out_dir = join(base_dir, 'keypoints_ETH_3000_0.01_0.1_ds0.2')
+    rov_file = join(base_dir, 'test_list.txt')
 
     model_file = './models/MS_SVCONV_4cm_X2_3head_eth.pt' # ETH
-    # model_file = './models/MS_SVCONV_B4cm_X2_3head.pt' # ETH
-    # model_file = './models/MS_SVCONV_2cm_X2_3head_3dm.pt' # 3DMatch
-    # model_file = './models/MS_SVCONV_B2cm_X2_3head.pt' # TUM
-    max_ref = 4 # maximum number of reference scans to test
     max_trials = 5 # maximum number of trials for RANSAC
     min_fitness = 0.01 # minimum fitness to accept transformation
     voxel_size = 0.04
     num_kpts = 3000
-    non_rover = True # remove rover vehicle before processing
-    non_ground = True # remove ground points before processing
-    downsample = 0 # voxel size for downsampling, 0 means no downsampling
+    downsample_ref = 0.2
+    downsample_rov = 0
+    non_rover = False # remove rover vehicle before processing
+    non_ground = False # remove ground points before processing
     ransac_dist = 0.1 # distance threshold for RANSAC
 
     if not os.path.exists(out_dir):
         os.makedirs(out_dir)
 
-    main(velo_dir, out_dir, model_file, pos_file, map_file, ref_file, rov_file, max_ref, max_trials, min_fitness, voxel_size, num_kpts, non_rover, non_ground, downsample, ransac_dist)
+    # main(velo_rov_dir, velo_ref_dir, out_dir, model_file, rov_file, max_trials, min_fitness, voxel_size, num_kpts, downsample_ref, downsample_rov, non_rover, non_ground, ransac_dist)
+
+    main(velo_rov_dir, velo_ref_dir, out_dir, model_file, rov_file, max_trials, min_fitness, voxel_size, num_kpts, downsample_ref, downsample_rov, non_rover, non_ground, ransac_dist)
+
+
+    out_dir = join(base_dir, 'keypoints_ETH_3000_0.01_0.1_ds0.1')
+    if not os.path.exists(out_dir):
+        os.makedirs(out_dir)
+    downsample_ref = 0.1
+    main(velo_rov_dir, velo_ref_dir, out_dir, model_file, rov_file, max_trials, min_fitness, voxel_size, num_kpts, downsample_ref, downsample_rov, non_rover, non_ground, ransac_dist)
+
+    base_dir = '../../../KITTI_partial_10s_220504'
+    out_dir = join(base_dir, 'keypoints_ETH_3000_0.01_0.1_ds0.1')
+    if not os.path.exists(out_dir):
+        os.makedirs(out_dir)
+    downsample_ref = 0.1
+    main(velo_rov_dir, velo_ref_dir, out_dir, model_file, rov_file, max_trials, min_fitness, voxel_size, num_kpts, downsample_ref, downsample_rov, non_rover, non_ground, ransac_dist)

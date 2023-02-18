@@ -279,7 +279,7 @@ def main(velo_dir, out_dir, model_file, pos_file, map_file, ref_file, rov_file, 
 
         # Locate the rover scan file
         rov_filename = str(rov_id[i])[2:-2]
-        rov_path = join(velo_dir, rov_filename + '.ply')
+        rov_path = join(velo_dir, rov_filename + '.pcd')
         data_s = transform(read_pcd(rov_path, downsample, non_rover, non_ground)) # read rover scan
 
         # Indices of sorted distances to all reference cans for current rover scan
@@ -293,7 +293,7 @@ def main(velo_dir, out_dir, model_file, pos_file, map_file, ref_file, rov_file, 
         while not found and j <= max_ref:
             # Locate the reference scan file
             ref_filename = str(ref_id[sorted_idx[j]])[2:-2]
-            ref_path = join(velo_dir, ref_filename + '.ply')
+            ref_path = join(velo_dir, ref_filename + '.pcd')
 
             # Reuse features of reference scans if they have been computed before
             if ref_filename in data_map:
@@ -314,7 +314,7 @@ def main(velo_dir, out_dir, model_file, pos_file, map_file, ref_file, rov_file, 
             rand_s = torch.randint(0, len(feat_s), (num_kpts, ))
             rand_t = torch.randint(0, len(feat_t), (num_kpts, ))
 
-            # matches = get_matches(feat_s[rand_s], feat_t[rand_t], sym=True)  # nearest neighbour
+            # matches = get_matches(feat_s[rand_s], feat_t[rand_t], sym=True) # nearest neighbour
             # sel_s = matches[:,0]
             # sel_t = matches[:,1]
 
@@ -332,7 +332,7 @@ def main(velo_dir, out_dir, model_file, pos_file, map_file, ref_file, rov_file, 
                 # kpts_s = np.asarray(data_s.pos[rand_s][sel_s][corres[:, 0], :]) # TODO: apply georeferencing here?
                 # kpts_t = np.asarray(data_t.pos[rand_t][sel_t][corres[:, 1], :])
 
-                if reg_result.fitness >= min_fitness and is_well_distributed(kpts_s):
+                if reg_result.fitness >= min_fitness:
                     break
                 elif k == max_trials - 1:
                     inlier_rmse = 0.0
@@ -370,37 +370,28 @@ def main(velo_dir, out_dir, model_file, pos_file, map_file, ref_file, rov_file, 
 
 
 if __name__ == '__main__':
-    # HK-Data20200314
-    base_dir = '../../../UrbanNav/HK-Data20200314'
+    # HK_20190428
+    base_dir = '../../../UrbanNav/HK_20190428'
     velo_dir = join(base_dir, 'velodyne')
-    out_dir = join(base_dir, 'keypoints_ETH_3000_0.01_0.1_NRNG_test3')
-    pos_file = join(base_dir, 'ublox_sd_test3.csv')
-    map_file = join(base_dir, 'velodyne_map2/hdMap_xyz.csv')
-    ref_file = join(base_dir, 'map_list2.txt')
-    rov_file = join(base_dir, 'test_list3.txt')
-
-    # # Tokyo-Odaiba
-    # base_dir = '../../../UrbanNav/Tokyo_Data/Odaiba'
-    # velo_dir = join(base_dir, 'velodyne')
-    # out_dir = join(base_dir, 'keypoints_ETH_3000_0.01_0.1_NR')
-    # pos_file = join(base_dir, 'ublox_test.csv')
-    # map_file = join(base_dir, 'velodyne_map/hdMap_xyz.csv')
-    # ref_file = join(base_dir, 'map_list.txt')
-    # rov_file = join(base_dir, 'test_list.txt')
+    out_dir = join(base_dir, 'keypoints_ETH_3000_0.01_0.2')
+    pos_file = join(base_dir, 'ublox_test_xyz_gt.csv')
+    map_file = join(base_dir, 'velodyne_map/hdMap_xyz_gt.csv')
+    ref_file = join(base_dir, 'map_list.txt')
+    rov_file = join(base_dir, 'test_list.txt')
 
     model_file = './models/MS_SVCONV_4cm_X2_3head_eth.pt' # ETH
     # model_file = './models/MS_SVCONV_B4cm_X2_3head.pt' # ETH
     # model_file = './models/MS_SVCONV_2cm_X2_3head_3dm.pt' # 3DMatch
     # model_file = './models/MS_SVCONV_B2cm_X2_3head.pt' # TUM
-    max_ref = 4 # maximum number of reference scans to test
+    max_ref = 5 # maximum number of reference scans to test
     max_trials = 5 # maximum number of trials for RANSAC
     min_fitness = 0.01 # minimum fitness to accept transformation
     voxel_size = 0.04
     num_kpts = 3000
-    non_rover = True # remove rover vehicle before processing
-    non_ground = True # remove ground points before processing
+    non_rover = False # remove rover vehicle before processing
+    non_ground = False # remove ground points before processing
     downsample = 0 # voxel size for downsampling, 0 means no downsampling
-    ransac_dist = 0.1 # distance threshold for RANSAC
+    ransac_dist = 0.2 # distance threshold for RANSAC
 
     if not os.path.exists(out_dir):
         os.makedirs(out_dir)
